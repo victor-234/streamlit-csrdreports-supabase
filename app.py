@@ -114,9 +114,9 @@ if st.session_state["user"]:
                 supabase.table("companies")
                 .upsert(
                     {
-                        "name": companyName, 
-                        "isin": companyIsin, 
-                        "country": companyCountry,
+                        "name": companyName.strip(),
+                        "isin": companyIsin.strip(), 
+                        "country": companyCountry.strip(),
                         "industry": companyIndustry,
                         "sector": industry_sector.query("industry == @companyIndustry")['sector'].values[0],
                     }, 
