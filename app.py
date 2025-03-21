@@ -141,7 +141,7 @@ if st.session_state["user"]:
             doc = pymupdf.open(stream=pdf_data)
             doc.select(list(range(startPdf - 1, min(endPdf, len(doc)))))
             doc.save("sliced-pdf.pdf")
-            st.toast(f"Sliced pages from PDF", icon=":material/check:")
+            st.toast(f"Sliced pages from PDF", icon="🔪")
 
             # Upsert document to database
             documentUpsert_response = (
@@ -157,7 +157,7 @@ if st.session_state["user"]:
                 )
                 .execute()
             )
-            st.toast(f"Upserted document", icon=":material/check:")
+            st.toast(f"Upserted document", icon="🎉")
 
             # Upload PDF file to CDN
             with open("sliced-pdf.pdf", "rb") as fs:
@@ -167,18 +167,21 @@ if st.session_state["user"]:
                     file=fs,
                     access_token=st.session_state.get("session").access_token,
                 )
+                st.toast("File uploaded to CDN!", icon="🍿")
 
         except Exception as e:
             if isinstance(e, TusCommunicationError):
-                st.info("File exists on CDN, progressing...")
+                st.toast("File exists on CDN, progressing...", icon="🤷")
             else:
-                st.info(f"Could not upload PDF to CDN ({e})")
+                st.info(f"Could not upload PDF to CDN ({e})\nWill continue uploading the pages...")
 
 
         # Upload badges of pages of the PDF to Mistral and create the embeddings
-        for batch, (start, end) in enumerate(get_batches(len(doc), batch_size=2), 1):
+        for batch, page_range in enumerate(get_batches(len(doc), batch_size=100)):
+            start = list(page_range)[0]
+            end = list(page_range)[-1]
             doc = pymupdf.open("sliced-pdf.pdf")
-            doc.select([start, end])
+            doc.select(list(page_range))
             doc.save("sliced-pdf-pages.pdf")
             
             with open("sliced-pdf-pages.pdf", "rb") as f:
@@ -219,7 +222,7 @@ if st.session_state["user"]:
                     .execute()
                 )
 
-            st.toast(f"Added markdown and embeddings to database (batch {batch + 1})", icon=":material/check:")
+            st.toast(f"Added markdown and embeddings to database (batch {batch + 1})", icon="🤙")
 
 
 else:
