@@ -10,6 +10,7 @@ import streamlit as st
 
 from mistralai import Mistral
 from supabase import create_client, Client
+from tusclient.exceptions import TusCommunicationError
 
 from helpers import upload_file_to_supabase
 
@@ -155,7 +156,7 @@ if st.session_state["user"]:
                 )
                 .execute()
             )
-            st.toast(f"Upserted {documentType} ({documentYear})", icon=":material/check:")
+            st.toast(f"Upserted document", icon=":material/check:")
 
             # Upload PDF file to CDN
             with open("sliced-pdf.pdf", "rb") as fs:
@@ -167,28 +168,29 @@ if st.session_state["user"]:
                 )
 
         except Exception as e:
-            st.error("Failed to upload PDF to CDN (403 means it is already there, so no worries) " + str(e))
+            if isinstance(e, TusCommunicationError):
+                st.info("File exists on CDN, progressing...")
+            else:
+                st.info(f"Could not upload PDF to CDN ({e})")
 
 
-        try:
-            # Upload the new PDF file to Mistral
-            with open("sliced-pdf.pdf", "rb") as f:
+        # Upload each page of the PDF to Mistral and create the embedding
+        for p in range(len(doc)):
+            print(p)
+            doc = pymupdf.open("sliced-pdf.pdf")
+            doc.select([p])
+            doc.save("sliced-pdf-page.pdf")
+            
+            with open("sliced-pdf-page.pdf", "rb") as f:
                 uploaded_pdf = client.files.upload(
                     file={
-                        "file_name": "report-pdf",
+                        "file_name": "report-pdf-page",
                         "content": f,
                     },
                     purpose="ocr"
             )
-                
-        except Exception as e:
-            st.error("Failed to upload PDF to Mistral OCR" + str(e))
-        
-        signed_url = client.files.get_signed_url(file_id=uploaded_pdf.id)
-        if not signed_url:
-            st.error("Failed to retrieve signed URL from the upload to Mistral OCR response.")
-        else:
-            st.toast("File successfully uploaded to Mistral. Processing OCR...", icon=":material/check:")
+
+            signed_url = client.files.get_signed_url(file_id=uploaded_pdf.id)
 
             ocr_response = client.ocr.process(
                 model="mistral-ocr-latest",
@@ -198,30 +200,25 @@ if st.session_state["user"]:
                 }
             )
 
-            try:
-                for n, page in enumerate(ocr_response.pages):
-                    embeddings_batch_response = client.embeddings.create(
-                        model="mistral-embed",
-                        inputs=page.markdown,
-                    )
+            embeddings_batch_response = client.embeddings.create(
+                model="mistral-embed",
+                inputs=ocr_response.pages[0].markdown,
+            )
 
-                    pageInsert_response = (
-                        supabase.table("pages")
-                        .upsert(
-                            {
-                                "document_id": documentUpsert_response.data[0].get("id"),
-                                "page": startPdf + n,
-                                "content": page.markdown,
-                                "embedding": embeddings_batch_response.data[0].embedding
-                            }
-                        )
-                        .execute()
-                    )
+            pageInsert_response = (
+                supabase.table("pages")
+                .upsert(
+                    {
+                        "document_id": documentUpsert_response.data[0].get("id"),
+                        "page": startPdf + p,
+                        "content": ocr_response.pages[0].markdown,
+                        "embedding": embeddings_batch_response.data[0].embedding
+                    }
+                )
+                .execute()
+            )
 
-                st.toast(f"Added markdown and embeddings to database", icon=":material/check:")
-
-            except Exception as e:
-                st.error(f"Failed to embed  markdown: {e}")
+            st.toast(f"Added markdown and embeddings to database (page {startPdf + p})", icon=":material/check:")
 
 
 else:
