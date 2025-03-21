@@ -27,10 +27,13 @@ industry_sector = pd.read_csv("sasb-industry-sector.csv")
 
 
 # ----- Initialize session state for user if not already present
+st.set_page_config(layout="wide", page_title="SRN CSRD Reports", page_icon="logo.png")
+st.markdown("""<style> footer {visibility: hidden;} </style> """, unsafe_allow_html=True)
+
+# ----- Login Function (placed in the sidebar)
 if "user" not in st.session_state:
     st.session_state["user"] = None
 
-# ----- Login Function (placed in the sidebar)
 def login_sidebar():
     with st.sidebar.form(key="login_form", enter_to_submit=False):
         st.subheader("Log in to your account")
@@ -132,14 +135,11 @@ if st.session_state["user"]:
         # Handle PDF
         try:
             # Slice file
-            file_name = uploaded_file.name
-            file_name_pages = f"{file_name}-pages.pdf"
-
             pdf_data = uploaded_file.read()
             doc = pymupdf.open(stream=pdf_data)
             doc.select(list(range(startPdf - 1, min(endPdf, len(doc)))))
-            doc.save(file_name_pages)
-            st.toast(f"File '{file_name_pages}' created with selected pages!", icon=":material/check:")
+            doc.save("sliced-pdf.pdf")
+            st.toast(f"Sliced pages from PDF", icon=":material/check:")
 
             # Upsert document to database
             documentUpsert_response = (
@@ -158,7 +158,7 @@ if st.session_state["user"]:
             st.toast(f"Upserted {documentType} ({documentYear})", icon=":material/check:")
 
             # Upload PDF file to CDN
-            with open("csrd-first100.pdf-pages.pdf", "rb") as fs:
+            with open("sliced-pdf.pdf", "rb") as fs:
                 upload_file_to_supabase(
                     supabase_url=supabase_url,
                     file_name=documentUpsert_response.data[0].get("id") + ".pdf",
@@ -167,22 +167,26 @@ if st.session_state["user"]:
                 )
 
         except Exception as e:
-            st.error(e)
+            st.error("Failed to upload PDF to CDN (403 means it is already there, so no worries) " + str(e))
 
 
-        # Upload the new PDF file to Mistral
-        with open(file_name_pages, "rb") as f:
-            uploaded_pdf = client.files.upload(
-                file={
-                    "file_name": file_name_pages,
-                    "content": f,
-                },
-                purpose="ocr"
+        try:
+            # Upload the new PDF file to Mistral
+            with open("sliced-pdf.pdf", "rb") as f:
+                uploaded_pdf = client.files.upload(
+                    file={
+                        "file_name": "report-pdf",
+                        "content": f,
+                    },
+                    purpose="ocr"
             )
+                
+        except Exception as e:
+            st.error("Failed to upload PDF to Mistral OCR" + str(e))
         
         signed_url = client.files.get_signed_url(file_id=uploaded_pdf.id)
         if not signed_url:
-            st.error("Failed to retrieve signed URL from the upload response.")
+            st.error("Failed to retrieve signed URL from the upload to Mistral OCR response.")
         else:
             st.toast("File successfully uploaded to Mistral. Processing OCR...", icon=":material/check:")
 
@@ -205,7 +209,7 @@ if st.session_state["user"]:
                         supabase.table("pages")
                         .upsert(
                             {
-                                "document_id": "c2d1488a-9ce2-4522-9ff4-2033c6183f71", #documentUpsert_response.data[0].get("id")
+                                "document_id": documentUpsert_response.data[0].get("id"),
                                 "page": startPdf + n,
                                 "content": page.markdown,
                                 "embedding": embeddings_batch_response.data[0].embedding
