@@ -1,0 +1,7 @@
+pandas
+mistralai
+supabase
+tusclient
+scikit-learn
+dotenv
+pymupdf
