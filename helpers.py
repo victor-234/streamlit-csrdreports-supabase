@@ -45,3 +45,8 @@ def get_most_similar_pages(prompt: str, pages: list, mistral_api_key, topk=5):
     
     return pages
 
+
+def get_batches(n, batch_size=100):
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        yield range(start, end)

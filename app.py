@@ -13,6 +13,7 @@ from supabase import create_client, Client
 from tusclient.exceptions import TusCommunicationError
 
 from helpers import upload_file_to_supabase
+from helpers import get_batches
 
 # ----- Setup stuff
 dotenv.load_dotenv()
@@ -28,7 +29,7 @@ industry_sector = pd.read_csv("sasb-industry-sector.csv")
 
 
 # ----- Initialize session state for user if not already present
-st.set_page_config(layout="wide", page_title="SRN CSRD Reports", page_icon="logo.png")
+st.set_page_config(page_title="SRN CSRD Reports", page_icon="logo.png")
 st.markdown("""<style> footer {visibility: hidden;} </style> """, unsafe_allow_html=True)
 
 # ----- Login Function (placed in the sidebar)
@@ -174,17 +175,16 @@ if st.session_state["user"]:
                 st.info(f"Could not upload PDF to CDN ({e})")
 
 
-        # Upload each page of the PDF to Mistral and create the embedding
-        for p in range(len(doc)):
-            print(p)
+        # Upload badges of pages of the PDF to Mistral and create the embeddings
+        for batch, (start, end) in enumerate(get_batches(len(doc), batch_size=2), 1):
             doc = pymupdf.open("sliced-pdf.pdf")
-            doc.select([p])
-            doc.save("sliced-pdf-page.pdf")
+            doc.select([start, end])
+            doc.save("sliced-pdf-pages.pdf")
             
-            with open("sliced-pdf-page.pdf", "rb") as f:
+            with open("sliced-pdf-pages.pdf", "rb") as f:
                 uploaded_pdf = client.files.upload(
                     file={
-                        "file_name": "report-pdf-page",
+                        "file_name": "report-pdf-pages",
                         "content": f,
                     },
                     purpose="ocr"
@@ -205,20 +205,21 @@ if st.session_state["user"]:
                 inputs=ocr_response.pages[0].markdown,
             )
 
-            pageInsert_response = (
-                supabase.table("pages")
-                .upsert(
-                    {
-                        "document_id": documentUpsert_response.data[0].get("id"),
-                        "page": startPdf + p,
-                        "content": ocr_response.pages[0].markdown,
-                        "embedding": embeddings_batch_response.data[0].embedding
-                    }
+            for p, page in enumerate(ocr_response.pages):
+                pageInsert_response = (
+                    supabase.table("pages")
+                    .upsert(
+                        {
+                            "document_id": documentUpsert_response.data[0].get("id"),
+                            "page": startPdf + start + p,
+                            "content": page.markdown,
+                            "embedding": embeddings_batch_response.data[0].embedding
+                        }
+                    )
+                    .execute()
                 )
-                .execute()
-            )
 
-            st.toast(f"Added markdown and embeddings to database (page {startPdf + p})", icon=":material/check:")
+            st.toast(f"Added markdown and embeddings to database (batch {batch + 1})", icon=":material/check:")
 
 
 else:
