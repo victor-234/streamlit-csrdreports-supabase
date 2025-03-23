@@ -14,6 +14,9 @@ from tusclient.exceptions import TusCommunicationError
 
 from helpers import upload_file_to_supabase
 from helpers import get_batches
+from helpers import upload_file_to_mistral_ocr
+from helpers import insert_page_to_supabase
+from helpers import create_embedding
 
 # ----- Setup stuff
 dotenv.load_dotenv()
@@ -38,7 +41,7 @@ if "user" not in st.session_state:
 
 def login_sidebar():
     with st.sidebar.form(key="login_form", enter_to_submit=False):
-        st.subheader("Log in to your account")
+        st.subheader("Log in")
         email = st.text_input("Email", key="login_email")
         password = st.text_input("Password", type="password", key="login_password")
         submit_button = st.form_submit_button(label="Log In")
@@ -68,13 +71,24 @@ def logout_sidebar():
 # In the sidebar, display login form or user details
 if st.session_state["user"] is None:
     login_sidebar()
+
 else:
-    st.sidebar.write("You are logged in as ", st.session_state["user"].email)
+    st.sidebar.write("You are logged in as " + st.session_state["user"].email)
+
     if st.sidebar.button("Log Out"):
         logout_sidebar()
 
+    with st.sidebar:
+        st.divider()
+        pdf_is_cut = st.checkbox(label="PDF is already sliced")
+        if pdf_is_cut:
+            st.caption("You still have to enter the correct start and end pages in the PDF!")
+        
+        # batch_size = st.number_input(label="Batch size for PDF pages", min_value=1, value=50, disabled=pdf_is_cut)
+        batch_size = 50
+
 # Main content of the app
-st.title("Upload into the database")
+st.title("CSRD reports database")
 
 
 if st.session_state["user"]:
@@ -84,7 +98,7 @@ if st.session_state["user"]:
 
     companyName = st.text_input("Name")
     companyIsin = st.text_input("ISIN")
-    companyIndustry = st.selectbox("Industry", options=sorted(industry_sector['industry'].values))
+    companyIndustry = st.selectbox("Industry", options=sorted(industry_sector['industry'].values), index=0)
     companyCountry = st.text_input("Country")
     
     leftCol3, leftCol4 = st.columns(2)
@@ -97,11 +111,11 @@ if st.session_state["user"]:
 
     leftCol3, leftCol4 = st.columns(2)
     with leftCol3:
-        startPdf = st.number_input(step=1, min_value=1, value=1, label="Start page in the PDF file")
+        startPdf = st.number_input(step=1, min_value=1, value=None, label="Start page in the PDF file")
     with leftCol4:  
-        endPdf = st.number_input(step=1, min_value=2, value=2, label="Ending page in the PDF file")
+        endPdf = st.number_input(step=1, min_value=2, value=None, label="Ending page in the PDF file")
 
-    submit = st.button("Process PDF")
+    submit = st.button("Process PDF", disabled=companyName=="" or startPdf==0 or endPdf==0)
 
 
 
@@ -129,101 +143,98 @@ if st.session_state["user"]:
                 )
                 .execute()
             )
-            st.toast(f"Upserted {companyName}", icon=":material/check:")
+            st.toast(f"Upserted {companyName} as a company", icon=":material/check:")
 
         except Exception as e:
             st.error(e)
 
         # Handle PDF
-        try:
-            # Slice file
+        if not pdf_is_cut:
             pdf_data = uploaded_file.read()
             doc = pymupdf.open(stream=pdf_data)
             doc.select(list(range(startPdf - 1, min(endPdf, len(doc)))))
             doc.save("sliced-pdf.pdf")
             st.toast(f"Sliced pages from PDF", icon="🔪")
 
-            # Upsert document to database
-            documentUpsert_response = (
-                supabase.table("documents")
-                .upsert(
-                    {
-                        "company_id": companyUpsert_response.data[0].get("id"),
-                        "year": documentYear,
-                        "type": documentType,
-                        "pages": f"({startPdf}, {endPdf})"
-                    },
-                    on_conflict=["company_id, year, type"]
-                )
-                .execute()
-            )
-            st.toast(f"Upserted document", icon="🎉")
+        else:
+            with open("sliced-pdf.pdf", mode='wb') as w:
+                w.write(uploaded_file.getvalue())
 
-            # Upload PDF file to CDN
+        # Upsert document to database
+        documentUpsert_response = (
+            supabase.table("documents")
+            .upsert(
+                {
+                    "company_id": companyUpsert_response.data[0].get("id"),
+                    "year": documentYear,
+                    "type": documentType,
+                    "pages": f"({startPdf}, {endPdf})"
+                },
+                on_conflict=["company_id, year, type"]
+            )
+            .execute()
+        )
+        st.toast(f"Upserted document", icon="🎉")
+        document_id = documentUpsert_response.data[0].get("id")
+
+        # Upload PDF file to CDN
+        try:
             with open("sliced-pdf.pdf", "rb") as fs:
                 upload_file_to_supabase(
                     supabase_url=supabase_url,
-                    file_name=documentUpsert_response.data[0].get("id") + ".pdf",
+                    file_name=document_id + ".pdf",
                     file=fs,
                     access_token=st.session_state.get("session").access_token,
                 )
-                st.toast("File uploaded to CDN!", icon="🍿")
-
+            st.toast("File uploaded to CDN!", icon="🍿")
+            
         except Exception as e:
             if isinstance(e, TusCommunicationError):
-                st.toast("File exists on CDN, progressing...", icon="🤷")
+                st.toast("File exists on CDN, proceeding...", icon="🤷")
             else:
-                st.info(f"Could not upload PDF to CDN ({e})\nWill continue uploading the pages...")
+                st.info(f"Could not upload PDF to CDN ({e})\nWill continue processing the pages...")
 
 
-        # Upload badges of pages of the PDF to Mistral and create the embeddings
-        for batch, page_range in enumerate(get_batches(len(doc), batch_size=100)):
-            start = list(page_range)[0]
-            end = list(page_range)[-1]
-            doc = pymupdf.open("sliced-pdf.pdf")
-            doc.select(list(page_range))
-            doc.save("sliced-pdf-pages.pdf")
-            
-            with open("sliced-pdf-pages.pdf", "rb") as f:
-                uploaded_pdf = client.files.upload(
-                    file={
-                        "file_name": "report-pdf-pages",
-                        "content": f,
-                    },
-                    purpose="ocr"
-            )
+        if not pdf_is_cut:
+            # Upload batches of pages of the PDF to Mistral and create the embeddings
+            for batch, page_range in enumerate(get_batches(len(doc), batch_size=batch_size)):
+                start = list(page_range)[0]
+                end = list(page_range)[-1]
+                doc = pymupdf.open("sliced-pdf.pdf")
+                doc.select(list(page_range))
+                doc.save("sliced-pdf-pages.pdf")
+                
+                ocr_response = upload_file_to_mistral_ocr("sliced-pdf-pages.pdf", mistral_api_key)
+                text_markdowns = [x.markdown for x in ocr_response.pages]
 
-            signed_url = client.files.get_signed_url(file_id=uploaded_pdf.id)
+                embedding_response = create_embedding(text_markdowns, mistral_api_key)
+                text_embeddings = [x.embedding for x in embedding_response.data]
 
-            ocr_response = client.ocr.process(
-                model="mistral-ocr-latest",
-                document={
-                    "type": "document_url",
-                    "document_url": signed_url.url,
-                }
-            )
+                for p, (markdown, embedding) in enumerate(zip(text_markdowns, text_embeddings)):
+                    real_page = startPdf + start + p
+                    insert_page_to_supabase(supabase, document_id, real_page, markdown, embedding)
+                    
 
-            embeddings_batch_response = client.embeddings.create(
-                model="mistral-embed",
-                inputs=ocr_response.pages[0].markdown,
-            )
+                st.toast(f"Added markdown and embeddings to database (batch {batch + 1})", icon="🤙")
 
-            for p, page in enumerate(ocr_response.pages):
-                pageInsert_response = (
-                    supabase.table("pages")
-                    .upsert(
-                        {
-                            "document_id": documentUpsert_response.data[0].get("id"),
-                            "page": startPdf + start + p,
-                            "content": page.markdown,
-                            "embedding": embeddings_batch_response.data[0].embedding
-                        }
-                    )
-                    .execute()
-                )
+        else:
+            ocr_response = upload_file_to_mistral_ocr("sliced-pdf.pdf", mistral_api_key)
+            text_markdowns = [x.markdown for x in ocr_response.pages]
 
-            st.toast(f"Added markdown and embeddings to database (batch {batch + 1})", icon="🤙")
+            for batch, page_range in enumerate(get_batches(len(ocr_response.pages), batch_size=batch_size)):
+                start = list(page_range)[0]
+                end = list(page_range)[-1]
+                text_markdowns_relevant = text_markdowns[start:end+1]
+
+                embedding_response = create_embedding(text_markdowns_relevant, mistral_api_key)
+                text_embeddings = [x.embedding for x in embedding_response.data]
+
+                for p, (markdown, embedding) in enumerate(zip(text_markdowns_relevant, text_embeddings)):
+                    real_page = startPdf + start + p
+                    insert_page_to_supabase(supabase, document_id, real_page, markdown, embedding)
+
+                st.toast(f"Added markdown and embeddings to database (batch {batch + 1})", icon="🤙")
 
 
 else:
-    st.write("Please login first")
+    st.write("You need to log in to access and manage our document database.")

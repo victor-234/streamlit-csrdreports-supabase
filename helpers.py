@@ -46,7 +46,64 @@ def get_most_similar_pages(prompt: str, pages: list, mistral_api_key, topk=5):
     return pages
 
 
-def get_batches(n, batch_size=100):
-    for start in range(0, n, batch_size):
-        end = min(start + batch_size, n)
-        yield range(start, end)
+def get_batches(n, batch_size):
+    chunks = []
+    for i in range(0, n, batch_size):
+        chunks.append(list(range(n))[i:i + batch_size])
+
+    return chunks
+
+
+def upload_file_to_mistral_ocr(path: str, mistral_api_key):
+    """ returns signed mistral url to use for ocr"""
+    client = Mistral(api_key=mistral_api_key)
+
+    with open(path, "rb") as f:
+        uploaded_pdf = client.files.upload(
+            file={
+                "file_name": "report-pdf-pages",
+                "content": f,
+            },
+            purpose="ocr"
+        )
+
+    signed_url = client.files.get_signed_url(file_id=uploaded_pdf.id)
+
+    ocr_response = client.ocr.process(
+        model="mistral-ocr-latest",
+        document={
+            "type": "document_url",
+            "document_url": signed_url.url,
+        }
+    )
+
+    return ocr_response
+
+
+def insert_page_to_supabase(supabase, document_id, page, content, embedding):
+    (
+        supabase.table("pages")
+        .upsert(
+            {
+                "document_id": document_id,
+                "page": page,
+                "content": content,
+                "embedding": embedding
+            }
+        )
+        .execute()
+    )
+
+
+def create_embedding(text: str, mistral_api_key):
+    client = Mistral(api_key=mistral_api_key)
+    try:
+        embeddings_response = client.embeddings.create(
+            model="mistral-embed",
+            inputs=text,
+        )
+
+    except:
+        embeddings_response = ...
+
+    return embeddings_response
