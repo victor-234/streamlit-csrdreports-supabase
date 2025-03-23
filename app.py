@@ -29,7 +29,7 @@ industry_sector = pd.read_csv("sasb-industry-sector.csv")
 
 
 # ----- Initialize session state for user if not already present
-st.set_page_config(page_title="SRN CSRD Reports", page_icon="logo.png")
+st.set_page_config(page_title="Report Manager | SRN", page_icon="logo.png")
 st.markdown("""<style> footer {visibility: hidden;} </style> """, unsafe_allow_html=True)
 
 # ----- Login Function (placed in the sidebar)
